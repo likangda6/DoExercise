@@ -1,8 +1,0 @@
-python-dotenv
-requests
-openai
-pymongo
-fastapi
-uvicorn[standard]
-python-multipart
-Pillow
