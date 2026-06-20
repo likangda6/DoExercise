@@ -348,6 +348,15 @@ async def import_pdf(file: UploadFile = File(...), quiz_id: str = Form(...)):
 
 answer_cache: Dict[str, Dict] = {}
 
+@app.get("/api/db-test")
+async def test_db():
+    try:
+        db = get_db()
+        result = db.list_collection_names()
+        return {"status": "connected", "collections": result}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 @app.get("/api/start-quiz")
 async def start_quiz(quiz_id: str, count: int = 30):
     if not get_quizzes_collection().find_one({"_id": ObjectId(quiz_id)}):
