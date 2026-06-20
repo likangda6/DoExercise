@@ -50,8 +50,24 @@ app.add_middleware(
 
 # ---------- MongoDB 工具 ----------
 def get_db():
-    client = pymongo.MongoClient(MONGO_URL)
-    return client[MONGO_DB_NAME]
+    import ssl
+    try:
+        client = pymongo.MongoClient(
+            MONGO_URL,
+            tls=True,
+            tlsAllowInvalidCertificates=True,  # 允许无效证书
+            tlsAllowInvalidHostnames=True,      # 允许无效主机名
+            serverSelectionTimeoutMS=30000,     # 30秒超时
+            connectTimeoutMS=30000,
+            socketTimeoutMS=30000
+        )
+        # 测试连接
+        client.admin.command('ping')
+        print("[MongoDB] 连接成功！")
+        return client[MONGO_DB_NAME]
+    except Exception as e:
+        print(f"[MongoDB] 连接失败: {e}")
+        raise e
 
 def get_questions_collection():
     return get_db()[QUESTIONS_COLLECTION]
