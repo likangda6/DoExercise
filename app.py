@@ -52,12 +52,18 @@ app.add_middleware(
 def get_db():
     import ssl
     try:
+        # 创建 SSL 上下文，强制 TLS 1.2
+        ssl_context = ssl.create_default_context()
+        ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        
         client = pymongo.MongoClient(
             MONGO_URL,
             tls=True,
-            tlsAllowInvalidCertificates='true',  # 必须是字符串 'true'
-            tlsAllowInvalidHostnames='true',     # 必须是字符串 'true'
-            serverSelectionTimeoutMS=30000,     # 30秒超时
+            tlsAllowInvalidCertificates=True,
+            tlsAllowInvalidHostnames=True,
+            serverSelectionTimeoutMS=30000,
             connectTimeoutMS=30000,
             socketTimeoutMS=30000
         )
@@ -67,6 +73,8 @@ def get_db():
         return client[MONGO_DB_NAME]
     except Exception as e:
         print(f"[MongoDB] 连接失败: {e}")
+        import traceback
+        traceback.print_exc()
         raise e
 
 def get_questions_collection():
