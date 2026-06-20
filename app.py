@@ -55,8 +55,8 @@ def get_db():
         client = pymongo.MongoClient(
             MONGO_URL,
             tls=True,
-            tlsAllowInvalidCertificates=True,  # 允许无效证书
-            tlsAllowInvalidHostnames=True,      # 允许无效主机名
+            tlsAllowInvalidCertificates='true',  # 必须是字符串 'true'
+            tlsAllowInvalidHostnames='true',     # 必须是字符串 'true'
             serverSelectionTimeoutMS=30000,     # 30秒超时
             connectTimeoutMS=30000,
             socketTimeoutMS=30000
