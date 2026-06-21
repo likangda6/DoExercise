@@ -692,24 +692,35 @@ async def start_quiz(quiz_id: str, count: int = 30):
     return JSONResponse({"quiz_id": session_id, "questions": questions_response})
 
 @app.get("/api/start-sequential-quiz")
-async def start_sequential_quiz(quiz_id: str):
+async def start_sequential_quiz(quiz_id: str, include_answers: bool = False):
+    """
+    include_answers=False (默认): 仅返回题目和选项，用于顺序答题。
+    include_answers=True: 额外返回 correct_answer 和 explanation，用于浏览题库。
+    """
     if not get_quizzes_collection().find_one({"_id": ObjectId(quiz_id)}):
         raise HTTPException(400, "题库不存在")
     coll = get_questions_collection()
     docs = list(coll.find({"quiz_id": quiz_id}).sort("_id", 1))
     if not docs:
         raise HTTPException(404, "该题库为空，请先导入题目")
+    
     questions_response = []
     for doc in docs:
         qid = str(doc["_id"])
-        questions_response.append({
+        item = {
             "id": qid,
             "type": doc.get("type", "single_choice"),
             "question": doc["question"],
             "options": doc["options"]
-        })
+        }
+        # 🔥 核心改动：当 include_answers 为 True 时，携带答案和解析
+        if include_answers:
+            item["correct_answer"] = doc.get("answer", "")
+            item["explanation"] = doc.get("explanation", "")
+        questions_response.append(item)
+        
     return JSONResponse({"questions": questions_response})
-
+    
 class SingleAnswerRequest(BaseModel):
     question_id: str
     answer: str
