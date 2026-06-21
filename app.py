@@ -554,6 +554,63 @@ async def import_pdf_stream(file: UploadFile = File(...), quiz_id: str = Form(..
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
+@app.post("/api/import-md-stream")
+async def import_md_stream(request: Request):
+    data = await request.json()
+    md_content = data.get("content")
+    filename = data.get("filename", "unknown.md")
+    quiz_id = data.get("quiz_id")
+
+    if not md_content or not quiz_id:
+        raise HTTPException(400, "缺少 content 或 quiz_id")
+
+    if not get_quizzes_collection().find_one({"_id": ObjectId(quiz_id)}):
+        raise HTTPException(400, "所选题库不存在")
+
+    async def event_generator():
+        queue = asyncio.Queue(maxsize=100)
+        worker_done = asyncio.Future()
+        loop = asyncio.get_event_loop()
+
+        def progress_callback(msg_dict):
+            try:
+                queue.put_nowait(msg_dict)
+            except asyncio.QueueFull:
+                pass
+
+        def do_work():
+            try:
+                progress_callback({"msg": "文件读取完成", "progress": 5})
+                # 直接调用 LLM 解析（无 MinerU）
+                questions = parse_questions_with_llm_with_progress(md_content, progress_callback)
+                inserted = save_questions_to_db(questions, quiz_id)
+                final_msg = f"成功导入 {inserted} 道新题目（共解析 {len(questions)} 道）"
+                progress_callback({"msg": final_msg, "progress": 100, "done": True})
+            except Exception as e:
+                progress_callback({"msg": f"错误: {str(e)}", "progress": -1, "error": True})
+            finally:
+                loop.call_soon_threadsafe(worker_done.set_result, None)
+
+        await loop.run_in_executor(None, do_work)
+
+        while True:
+            if worker_done.done() and queue.empty():
+                break
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                continue
+            if item.get("done"):
+                yield f"data: {json.dumps({'step': 'done', 'message': item['msg'], 'progress': item['progress']}, ensure_ascii=False)}\n\n"
+                break
+            if item.get("error"):
+                yield f"data: {json.dumps({'step': 'error', 'message': item['msg'], 'progress': -1}, ensure_ascii=False)}\n\n"
+                break
+            yield f"data: {json.dumps({'step': 'progress', 'message': item['msg'], 'progress': item['progress']}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
 # ---------- 原有同步接口（保留） ----------
 @app.post("/api/quizzes")
 async def api_create_quiz(name: str = Form(...)):
