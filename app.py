@@ -42,7 +42,7 @@ app = FastAPI(title="多课程选择题刷题系统 API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 生产环境替换为前端域名
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -114,7 +114,7 @@ def split_text_with_overlap(text: str, chunk_size: int, overlap: int) -> List[st
             break
     return chunks
 
-# ---------- 原始同步函数（保留，同时增加带回调的版本）----------
+# ---------- 原始同步函数（保留） ----------
 def upload_pdf_to_mineru(file_bytes: bytes, filename: str) -> str:
     """原始同步上传，无进度回调"""
     if not MINERU_API_TOKEN:
@@ -313,9 +313,9 @@ def save_questions_to_db(questions: List[Dict], quiz_id: str):
             inserted += 1
     return inserted
 
-# ---------- 带进度回调的包装函数（用于流式） ----------
+# ---------- 带进度回调的包装函数 ----------
 def upload_pdf_to_mineru_with_progress(file_bytes: bytes, filename: str, progress_callback):
-    """在同步线程中执行，并通过 callback 报告进度（每个进度为 dict 格式 {msg, progress}）"""
+    """在同步线程中执行，并通过 callback 报告进度"""
     if not MINERU_API_TOKEN:
         raise ValueError("MINERU_API_TOKEN 未设置")
 
@@ -355,7 +355,6 @@ def upload_pdf_to_mineru_with_progress(file_bytes: bytes, filename: str, progres
     timeout = 600
     start = time.time()
     zip_url = None
-    # 轮询解析状态，并动态更新进度 (25% ~ 70%)
     base_progress = 25
     max_wait_progress = 70
     elapsed = 0
@@ -364,7 +363,6 @@ def upload_pdf_to_mineru_with_progress(file_bytes: bytes, filename: str, progres
             raise TimeoutError("MinerU 解析超时")
         time.sleep(3)
         elapsed += 3
-        # 根据已用时间估算进度（最多到70%）
         p = min(max_wait_progress, base_progress + int(elapsed / timeout * (max_wait_progress - base_progress)))
         progress_callback({"msg": f"MinerU 解析中 ({elapsed}s)", "progress": p})
 
@@ -421,7 +419,7 @@ def upload_pdf_to_mineru_with_progress(file_bytes: bytes, filename: str, progres
     shutil.rmtree(extract_dir, ignore_errors=True)
 
     markdown_content = final_md_path.read_text(encoding="utf-8")
-    progress_callback({"msg": f"Markdown 提取完成", "progress": 85})
+    progress_callback({"msg": "Markdown 提取完成", "progress": 85})
     return markdown_content
 
 def parse_questions_with_llm_with_progress(markdown_text: str, progress_callback):
@@ -495,7 +493,7 @@ def parse_questions_with_llm_with_progress(markdown_text: str, progress_callback
     progress_callback({"msg": f"AI 提取完成，共 {len(all_questions)} 题", "progress": 95})
     return all_questions
 
-# ---------- 流式路由 ----------
+# ---------- 流式路由（修复版） ----------
 @app.post("/api/import-pdf-stream")
 async def import_pdf_stream(file: UploadFile = File(...), quiz_id: str = Form(...)):
     if not file.filename.endswith(".pdf"):
@@ -505,17 +503,19 @@ async def import_pdf_stream(file: UploadFile = File(...), quiz_id: str = Form(..
         raise HTTPException(400, "所选题库不存在")
 
     async def event_generator():
-        # 创建一个队列，用于线程间传递进度消息
-        queue = asyncio.Queue()
+        # 使用较大容量的队列，避免回调阻塞
+        queue = asyncio.Queue(maxsize=100)
+        # 用 Future 标记工作线程是否完成
+        worker_done = asyncio.Future()
+        loop = asyncio.get_event_loop()
 
-        # 定义回调函数，将进度消息放入队列
         def progress_callback(msg_dict):
             try:
                 queue.put_nowait(msg_dict)
             except asyncio.QueueFull:
+                # 如果队列满，可选择记录日志，此处忽略以避免阻塞
                 pass
 
-        # 在线程中执行耗时的同步任务
         def do_work():
             try:
                 # 1. 读取文件字节
@@ -534,22 +534,26 @@ async def import_pdf_stream(file: UploadFile = File(...), quiz_id: str = Form(..
                 progress_callback({"msg": final_msg, "progress": 100, "done": True})
             except Exception as e:
                 progress_callback({"msg": f"错误: {str(e)}", "progress": -1, "error": True})
+            finally:
+                # 无论成功或失败，都通知主循环工作结束
+                loop.call_soon_threadsafe(worker_done.set_result, None)
 
-        # 启动线程
-        loop = asyncio.get_event_loop()
+        # 提交任务到线程池
         await loop.run_in_executor(None, do_work)
 
-        # 从队列取出消息并 yield SSE 事件
+        # 消费队列中的消息，直到工作完成且队列为空
         while True:
+            # 检查是否应该退出
+            if worker_done.done() and queue.empty():
+                break
+
             try:
                 item = await asyncio.wait_for(queue.get(), timeout=0.5)
             except asyncio.TimeoutError:
-                # 检查线程是否还在运行，若已结束则退出
-                if not any(t.is_alive() for t in asyncio.all_tasks() if t.get_name() == "worker"):
-                    break
+                # 超时后继续循环，重新检查条件
                 continue
 
-            # 判断是否结束
+            # 处理收到的消息
             if item.get("done"):
                 yield f"data: {json.dumps({'step': 'done', 'message': item['msg'], 'progress': item['progress']}, ensure_ascii=False)}\n\n"
                 break
@@ -562,7 +566,7 @@ async def import_pdf_stream(file: UploadFile = File(...), quiz_id: str = Form(..
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
-# ---------- 原有同步接口（保留，用于兼容） ----------
+# ---------- 原有同步接口（保留） ----------
 @app.post("/api/quizzes")
 async def api_create_quiz(name: str = Form(...)):
     try:
