@@ -37,9 +37,7 @@ QUIZZES_COLLECTION = "quizzes"
 CHUNK_SIZE = 3000
 OVERLAP = 100
 
-# ---------- FastAPI 应用 + CORS ----------
 app = FastAPI(title="多课程选择题刷题系统 API")
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -503,9 +501,7 @@ async def import_pdf_stream(file: UploadFile = File(...), quiz_id: str = Form(..
         raise HTTPException(400, "所选题库不存在")
 
     async def event_generator():
-        # 使用较大容量的队列，避免回调阻塞
         queue = asyncio.Queue(maxsize=100)
-        # 用 Future 标记工作线程是否完成
         worker_done = asyncio.Future()
         loop = asyncio.get_event_loop()
 
@@ -513,55 +509,47 @@ async def import_pdf_stream(file: UploadFile = File(...), quiz_id: str = Form(..
             try:
                 queue.put_nowait(msg_dict)
             except asyncio.QueueFull:
-                # 如果队列满，可选择记录日志，此处忽略以避免阻塞
                 pass
 
         def do_work():
             try:
-                # 1. 读取文件字节
                 file_bytes = file.file.read()
                 progress_callback({"msg": "文件读取完成", "progress": 2})
 
-                # 2. MinerU 上传与解析（带进度）
                 md_content = upload_pdf_to_mineru_with_progress(file_bytes, file.filename, progress_callback)
 
-                # 3. LLM 提取题目（带进度）
+                # 🧹 删除临时生成的 .md 文件（内容已保存在 md_content 变量中）
+                stem = Path(file.filename).stem
+                md_file = OUTPUT_DIR / f"{stem}.md"
+                if md_file.exists():
+                    md_file.unlink()
+                    print(f"[清理] 已删除临时文件: {md_file}")
+
                 questions = parse_questions_with_llm_with_progress(md_content, progress_callback)
 
-                # 4. 保存到数据库
                 inserted = save_questions_to_db(questions, quiz_id)
                 final_msg = f"成功导入 {inserted} 道新题目（共解析 {len(questions)} 道）"
                 progress_callback({"msg": final_msg, "progress": 100, "done": True})
             except Exception as e:
                 progress_callback({"msg": f"错误: {str(e)}", "progress": -1, "error": True})
             finally:
-                # 无论成功或失败，都通知主循环工作结束
                 loop.call_soon_threadsafe(worker_done.set_result, None)
 
-        # 提交任务到线程池
         await loop.run_in_executor(None, do_work)
 
-        # 消费队列中的消息，直到工作完成且队列为空
         while True:
-            # 检查是否应该退出
             if worker_done.done() and queue.empty():
                 break
-
             try:
                 item = await asyncio.wait_for(queue.get(), timeout=0.5)
             except asyncio.TimeoutError:
-                # 超时后继续循环，重新检查条件
                 continue
-
-            # 处理收到的消息
             if item.get("done"):
                 yield f"data: {json.dumps({'step': 'done', 'message': item['msg'], 'progress': item['progress']}, ensure_ascii=False)}\n\n"
                 break
             if item.get("error"):
                 yield f"data: {json.dumps({'step': 'error', 'message': item['msg'], 'progress': -1}, ensure_ascii=False)}\n\n"
                 break
-
-            # 普通进度事件
             yield f"data: {json.dumps({'step': 'progress', 'message': item['msg'], 'progress': item['progress']}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
